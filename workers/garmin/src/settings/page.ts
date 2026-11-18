@@ -1,14 +1,13 @@
 import { VALIDITY_DAYS, type SettingsState } from "../user/user-store";
 import { SETTINGS_CSS } from "./style";
 
-export type PageError = "invalid" | "rejected" | "unavailable" | "deleting";
+export type PageError = "invalid" | "rejected" | "unavailable";
 /** validity is the key lifetime chosen in a failed save (already checked against VALIDITY_DAYS) */
 type View = { email: string; origin: string; error?: PageError; validity?: number };
 export const ERRORS: Record<PageError, string> = {
   invalid: "Paste the key and choose its validity.",
   rejected: "Garmin rejected this key. Check that you copied all of it, or create a new one.",
   unavailable: "Garmin is not responding. Try again in a few minutes.",
-  deleting: "Some files are still being deleted. Press Delete all again.",
 };
 
 const ACTION = "/garmin/settings"; // page address in the browser: gateway strips /garmin
@@ -92,7 +91,7 @@ function stateLine(s: SettingsState): string {
  * replace — under the "Replace key" row: with a link to Garmin, no top margin (the row provides it)
  */
 function keyForm(v: View, replace = false): string {
-  const err = v.error && v.error !== "deleting" ? ERRORS[v.error] : undefined;
+  const err = v.error && ERRORS[v.error];
   const chosen = v.validity ?? 365;
   const options = VALIDITY_DAYS.map((d) => `<option value="${esc(d)}"${d === chosen ? " selected" : ""}>${esc(d)} days</option>`).join("");
   return `<form method="post" action="${ACTION}"${replace ? "" : ` style="margin-top:12px"`}><input type="hidden" name="action" value="save">`
@@ -104,14 +103,9 @@ function keyForm(v: View, replace = false): string {
     + `<div class="field"><button class="btn primary">Save key</button></div></form>`;
 }
 
-function deleteAllRow(error?: PageError): string {
-  const err = error === "deleting";
-  return `<div class="row"><div><div>Delete all data</div><div class="desc">Erases the key, your history and workout files. This cannot be undone.</div></div>`
-    + `<form method="post" action="${ACTION}" onsubmit="return confirm('Delete your Garmin key, history and workout files? This cannot be undone.')">`
-    + `<button class="btn danger" name="action" value="delete-all"${err ? ` aria-describedby="delete-error"` : ""}>Delete all</button></form>`
-    + (err ? `<p class="error" id="delete-error">${esc(ERRORS.deleting)}</p>` : "")
-    + `</div>`;
-}
+const DELETE_ALL_ROW = `<div class="row"><div><div>Delete all data</div><div class="desc">Erases the key and your history. This cannot be undone.</div></div>`
+  + `<form method="post" action="${ACTION}" onsubmit="return confirm('Delete your Garmin key and history? This cannot be undone.')">`
+  + `<button class="btn danger" name="action" value="delete-all">Delete all</button></form></div>`;
 
 /** First visit (and after "Delete key"): three steps; while data exists, also the "Delete all data" row */
 function setup(s: SettingsState, v: View): string {
@@ -122,7 +116,7 @@ ${stateLine(s)}
 <div class="step"><div class="num">2</div><div><b>Paste the key</b><div class="note" role="note">${icon("warning", 16)}<span>${TRUST}</span></div>${keyForm(v)}</div></div>
 <div class="step later"><div class="num">3</div><div><b>Add the connector in Claude</b><p>Available once Garmin accepts the key.</p></div></div>
 </div>
-${s.hasData ? `<h2>Delete</h2>\n${deleteAllRow(v.error)}` : ""}`;
+${s.hasData ? `<h2>Delete</h2>\n${DELETE_ALL_ROW}` : ""}`;
 }
 
 /**
@@ -134,7 +128,7 @@ function connected(s: SettingsState, v: View): string {
   const label = s.key === "rejected" ? "Rejected" : expired ? "Expired" : "Working";
   const desc = s.key === "rejected" ? "Garmin no longer accepts this key"
     : !s.keyExpiresOn ? "" : `${expired ? "Expired on" : "Valid until"} ${date(s.keyExpiresOn)}`;
-  const open = (v.error && v.error !== "deleting") || s.key === "rejected" || expired ? " open" : "";
+  const open = v.error || s.key === "rejected" || expired ? " open" : "";
   return `${stateLine(s)}
 <h2>Garmin key</h2>
 <details${open}><summary class="row"><span>${label}${desc ? `<br><span class="desc">${esc(desc)}</span>` : ""}</span><span class="btn">Replace key</span></summary>${keyForm(v, true)}</details>
@@ -143,7 +137,7 @@ function connected(s: SettingsState, v: View): string {
 <div class="copy"><span>${esc(`${v.origin}/garmin/mcp`)}</span><button class="icon" id="copy" type="button" aria-label="Copy address" title="Copy">${icon("copy", 16)}</button></div>
 <h2>Delete</h2>
 <div class="row"><div><div>Delete key</div><div class="desc">Sync stops. Loaded data stays.</div></div><form method="post" action="${ACTION}"><button class="btn danger-soft" name="action" value="delete-key">Delete key</button></form></div>
-${deleteAllRow(v.error)}
+${DELETE_ALL_ROW}
 ${COPY_SCRIPT}`;
 }
 

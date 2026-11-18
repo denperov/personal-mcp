@@ -9,9 +9,9 @@ import { addDays, daysBetween } from "../src/garmin/dates";
 import {
   GarminClient, GarminHttpError, KeyRejectedError, RateLimitedError, TOKEN_PATH, type CachedToken,
 } from "../src/garmin/client";
-import { allStates, patchState, putFile, upsertRecords } from "../src/user/store";
+import { allStates, patchState, upsertRecords } from "../src/user/store";
 import {
-  BACKFILL_FLOOR, BACKFILL_ORDER, HISTORY, applyStep, fetchedFiles, fetchStep, nextBackfillStep, recentSteps, stateKey, staticSteps,
+  BACKFILL_FLOOR, BACKFILL_ORDER, HISTORY, applyStep, fetchStep, nextBackfillStep, recentSteps, stateKey, staticSteps,
   stepKey, stepLabel, userTimeZone, type FetchDeps, type Step,
 } from "../src/user/engine";
 
@@ -25,9 +25,7 @@ const memTokens = () => {
   let v: CachedToken | undefined;
   return { load: () => v, save: (t: CachedToken) => { v = t; } };
 };
-const newDeps = (): FetchDeps => ({
-  client: new GarminClient("test-key", memTokens()), files: env.FILES, prefix: `u/${crypto.randomUUID()}/`, today: TODAY,
-});
+const newDeps = (): FetchDeps => ({ client: new GarminClient("test-key", memTokens()), today: TODAY });
 const caught = (p: Promise<unknown>): Promise<any> => p.then(() => { throw new Error("expected rejection"); }, (e) => e);
 
 /** Everything in BACKFILL_ORDER except only is finished; the history start is history (null: not found yet) */
@@ -61,16 +59,16 @@ describe("engine", () => {
     expect(staticSteps(TODAY)).toEqual(["profile", "hr_zones", "weight_goal"].map((id) =>
       ({ kind: "dataset", id, start: TODAY, end: TODAY, backfill: false })));
     const sleep: Step = { kind: "dataset", id: "sleep", start: "2026-10-01", end: "2026-10-28", backfill: false };
-    const file: Step = { kind: "activity_file", activityId: "123" };
+    const workouts: Step = { kind: "activity_workouts", activityId: "123" };
     expect(stepKey(sleep)).toBe("dataset:sleep:2026-10-01:2026-10-28");
     expect(stepKey({ ...sleep, backfill: true })).not.toBe(stepKey(sleep));
-    expect(stepKey(file)).toBe("activity_file:123");
-    expect(stepKey({ kind: "activity_detail", activityId: "123" })).not.toBe(stepKey(file));
+    expect(stepKey(workouts)).toBe("activity_workouts:123");
+    expect(stepKey({ kind: "activity_detail", activityId: "123" })).not.toBe(stepKey(workouts));
     expect(stepKey({ kind: "activities", start: 0, limit: 20, backfill: false }))
       .not.toBe(stepKey({ kind: "activities", start: 20, limit: 20, backfill: false }));
-    expect([stepLabel(sleep), stepLabel(file), stepLabel({ kind: "activities", start: 0, limit: 20, backfill: true })])
-      .toEqual(["dataset:sleep", "activity_file", "activities"]);
-    expect([stateKey(sleep), stateKey(file), stateKey({ kind: "activities", start: 0, limit: 20, backfill: true })])
+    expect([stepLabel(sleep), stepLabel(workouts), stepLabel({ kind: "activities", start: 0, limit: 20, backfill: true })])
+      .toEqual(["dataset:sleep", "activity_workouts", "activities"]);
+    expect([stateKey(sleep), stateKey(workouts), stateKey({ kind: "activities", start: 0, limit: 20, backfill: true })])
       .toEqual(["sleep", "activity", "activity"]);
     const hist: Step = { kind: "history_start", start: "2000-01-01", end: "2000-12-31" };
     expect([stepKey(hist), stepLabel(hist), stateKey(hist)]).toEqual(["history_start:2000-01-01:2000-12-31", "history_start", HISTORY]);
@@ -80,10 +78,7 @@ describe("engine", () => {
 
   it("one Garmin data request per fetchStep", async () => {
     const m = garminMock({
-      data: {
-        "/activitylist-service/": [{ activityId: 1, startTimeLocal: "2026-10-27 07:00:00" }],
-        "/download-service/": () => new HttpResponse(new Uint8Array([80, 75, 3, 4])),
-      },
+      data: { "/activitylist-service/": [{ activityId: 1, startTimeLocal: "2026-10-27 07:00:00" }] },
     });
     network.use(...m.handlers);
     const deps = newDeps();
@@ -93,7 +88,6 @@ describe("engine", () => {
       { kind: "activities", start: 40, limit: 20, backfill: true },
       { kind: "activity_detail", activityId: "1" },
       { kind: "activity_workouts", activityId: "1" },
-      { kind: "activity_file", activityId: "1" },
     ];
     const paths: string[] = [];
     for (const s of steps) {
@@ -108,7 +102,6 @@ describe("engine", () => {
       "GET /activitylist-service/activities/search/activities?start=40&limit=20",
       "GET /activity-service/activity/1",
       "GET /activity-service/activity/1/workouts",
-      "GET /download-service/files/activity/1",
     ]);
   });
 
@@ -318,7 +311,7 @@ describe("engine", () => {
   it("token-exchange errors are rethrown, never data results", async () => {
     const steps: Step[] = [
       { kind: "dataset", id: "hrv", start: TODAY, end: TODAY, backfill: false },
-      { kind: "activity_file", activityId: "1" },
+      { kind: "activity_detail", activityId: "1" },
     ];
     for (const res of [() => HttpResponse.json({ m: "x" }, { status: 404 }), () => new HttpResponse(null, { status: 500 })]) {
       const m = garminMock();
@@ -330,7 +323,6 @@ describe("engine", () => {
         expect(e.path).toBe(TOKEN_PATH);
       }
       expect(m.dataCalls()).toEqual([]);
-      expect(await env.FILES.head(`${deps.prefix}activities/1.zip`)).toBeNull();
       network.resetHandlers();
     }
   });
@@ -401,25 +393,21 @@ describe("engine", () => {
         "/activity-service/activity/1": { activityId: 1, summaryDTO: { startTimeLocal: "2026-10-27T07:00:00.0" } },
         "/activity-service/activity/1/workouts": () => new HttpResponse(null, { status: 204 }),
         "/activity-service/activity/3/workouts": () => new HttpResponse(null, { status: 204 }),
-        "/download-service/": () => new HttpResponse(new Uint8Array([80, 75, 3, 4])),
       },
     });
     network.use(...m.handlers);
     const stub = newStub();
     const deps = newDeps();
     await inDo(stub, (sql) => {
-      // 2 is complete; 3 lacks workouts (its file returned 404, which counts as fetched)
+      // 2 is complete; 3 lacks workouts
       for (const k of ["2", "3"]) upsertRecords(sql, "activity_detail", [{ key: k, day: null, data: { activityId: Number(k) } }], NOW.toISOString());
       upsertRecords(sql, "activity_workouts", [{ key: "2", day: null, data: [] }], NOW.toISOString());
-      putFile(sql, { activityId: "2", r2Key: "x", status: 200, bytes: 1, fetchedAt: NOW.toISOString() });
-      putFile(sql, { activityId: "3", r2Key: null, status: 404, bytes: null, fetchedAt: NOW.toISOString() });
     });
     const page: Step = { kind: "activities", start: 0, limit: ACTIVITY_PAGE, backfill: false };
     const r = await runStep(stub, deps, page);
     expect(r.newSteps).toEqual([
       { kind: "activity_detail", activityId: "1" },
       { kind: "activity_workouts", activityId: "1" },
-      { kind: "activity_file", activityId: "1" },
       { kind: "activity_workouts", activityId: "3" },
     ]);
     const rows = await inDo(stub, (sql) => ({
@@ -439,12 +427,8 @@ describe("engine", () => {
     await runStep(stub, deps, { kind: "activity_workouts", activityId: "1" });
     expect(await inDo(stub, (sql) => sql.exec("SELECT data FROM records WHERE dataset = 'activity_workouts' AND key = '1'").toArray()))
       .toEqual([{ data: "[]" }]);
-    // missing after a partial run: only file 1 and workouts 3
-    expect((await runStep(stub, deps, page)).newSteps).toEqual([
-      { kind: "activity_file", activityId: "1" },
-      { kind: "activity_workouts", activityId: "3" },
-    ]);
-    await runStep(stub, deps, { kind: "activity_file", activityId: "1" });
+    // missing after a partial run: only workouts 3
+    expect((await runStep(stub, deps, page)).newSteps).toEqual([{ kind: "activity_workouts", activityId: "3" }]);
     await runStep(stub, deps, { kind: "activity_workouts", activityId: "3" });
     expect((await runStep(stub, deps, page)).newSteps).toEqual([]);
   });
@@ -488,69 +472,13 @@ describe("engine", () => {
     const next = () => inDo(stub, (sql) => nextBackfillStep(allStates(sql), TODAY, NOW));
     const s1 = (await next())!;
     expect(s1).toEqual({ kind: "activities", start: 0, limit: ACTIVITY_PAGE, backfill: true });
-    expect((await runStep(stub, deps, s1)).newSteps).toHaveLength(60);
+    expect((await runStep(stub, deps, s1)).newSteps).toHaveLength(40); // detail and workouts per activity
     expect(await state(stub, "activity")).toMatchObject({ backfill_cursor: "20", backfill_done_at: null });
     const s2 = (await next())!;
     expect(s2).toMatchObject({ kind: "activities", start: 20 });
     await runStep(stub, deps, s2);
     expect(await state(stub, "activity")).toMatchObject({ backfill_cursor: "23", backfill_done_at: NOW.toISOString() });
     expect(await next()).toBeNull();
-  });
-
-  it("file step stores R2 object or marks missing", async () => {
-    const m = garminMock({
-      data: {
-        "/download-service/files/activity/1": () => new HttpResponse(new Uint8Array([80, 75, 3, 4])),
-        "/download-service/files/activity/2": () => new HttpResponse("gone", { status: 404 }),
-      },
-    });
-    network.use(...m.handlers);
-    const stub = newStub();
-    const deps = newDeps();
-    const key = `${deps.prefix}activities/1.zip`;
-    expect(await runStep(stub, deps, { kind: "activity_file", activityId: "1" })).toEqual({ newSteps: [], rowsWritten: 1 });
-    await runStep(stub, deps, { kind: "activity_file", activityId: "2" });
-    const head = await env.FILES.head(key);
-    expect(head).not.toBeNull();
-    expect(head!.httpMetadata?.contentType).toBe("application/zip");
-    expect(await env.FILES.head(`${deps.prefix}activities/2.zip`)).toBeNull();
-    const files = await inDo(stub, (sql) => sql.exec("SELECT activity_id, r2_key, status, bytes FROM files ORDER BY activity_id").toArray());
-    expect(files).toEqual([
-      { activity_id: "1", r2_key: key, status: 200, bytes: 4 },
-      { activity_id: "2", r2_key: null, status: 404, bytes: null },
-    ]);
-  });
-
-  it("huge detail goes to R2", async () => {
-    const detail = { activityId: 1, summaryDTO: { startTimeLocal: "2026-10-27T07:00:00.0" }, big: "é".repeat(300_000) };
-    const m = garminMock({ data: { "/activity-service/activity/1": detail } });
-    network.use(...m.handlers);
-    const stub = newStub();
-    const deps = newDeps();
-    await runStep(stub, deps, { kind: "activity_detail", activityId: "1" });
-    const key = `${deps.prefix}json/activity_detail/1.json`;
-    const obj = await env.FILES.get(key);
-    expect(obj).not.toBeNull();
-    expect(obj!.httpMetadata?.contentType).toBe("application/json");
-    expect(await obj!.json()).toEqual(detail);
-    const row = await inDo(stub, (sql) => sql.exec("SELECT day, data FROM records WHERE dataset = 'activity_detail'").one());
-    expect(row.day).toBe("2026-10-27");
-    expect(JSON.parse(row.data as string)).toEqual({ r2_key: key, bytes: obj!.size });
-    expect(obj!.size).toBeGreaterThan(600_000); // UTF-8 bytes, not characters
-  });
-
-  it("fetchedFiles names exactly the R2 objects a step wrote", async () => {
-    network.use(...garminMock({ data: {
-      "/activitylist-service/": [{ activityId: 1, big: "x".repeat(300_000) }, { activityId: 2 }],
-      "/download-service/": () => new HttpResponse(new Uint8Array([80, 75, 3, 4])),
-    } }).handlers);
-    const deps = newDeps();
-    const written = [
-      ...fetchedFiles(await fetchStep(deps, { kind: "activities", start: 0, limit: ACTIVITY_PAGE, backfill: false })),
-      ...fetchedFiles(await fetchStep(deps, { kind: "activity_file", activityId: "1" })),
-    ];
-    expect(written).toEqual([`${deps.prefix}json/activity/1.json`, `${deps.prefix}activities/1.zip`]);
-    expect((await env.FILES.list({ prefix: deps.prefix })).objects.map((o) => o.key).sort()).toEqual([...written].sort());
   });
 
   it("userTimeZone falls back to UTC", async () => {

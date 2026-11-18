@@ -63,7 +63,7 @@ export class GarminClient {
   }
 
   async get(path: string): Promise<unknown | null> {
-    const res = await this.data(path, "application/json");
+    const res = await this.data(path);
     const text = await res.text();
     if (res.status === 204 || text === "") return null;
     try {
@@ -74,20 +74,15 @@ export class GarminClient {
     }
   }
 
-  async download(path: string): Promise<ArrayBuffer> {
-    const res = await this.data(path, "application/zip, application/x-zip-compressed, application/octet-stream");
-    return res.arrayBuffer();
-  }
-
   private fetch(url: string, init: RequestInit): Promise<Response> {
     return fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
   }
 
   /** Returns a successful (2xx) response with an unread body; any error is thrown. */
-  private async data(path: string, accept: string): Promise<Response> {
+  private async data(path: string): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
       const token = await this.token(attempt > 0);
-      const res = await this.fetch(GARMIN_BASE + path, { headers: { Accept: accept, Authorization: `Bearer ${token}` } });
+      const res = await this.fetch(GARMIN_BASE + path, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } });
       if (res.status === 401 && attempt === 0) {
         await res.body?.cancel();
         continue;

@@ -60,7 +60,7 @@ const typedDdl = (t: TypedTable) =>
   `CREATE TABLE ${t.name}(${t.columns.map(([c]) =>
     `${c} ${isText(t.name, c) ? "TEXT" : "NUMERIC"}${c === t.pk ? " PRIMARY KEY" : ""}`).join(", ")}) WITHOUT ROWID`;
 
-// DDL only; version number = index + 1
+// Version number = index + 1; a shipped version never changes, fixes go into a new one
 export const MIGRATIONS: string[][] = [[
   `CREATE TABLE records(dataset TEXT NOT NULL, key TEXT NOT NULL, day TEXT, data TEXT NOT NULL, fetched_at TEXT NOT NULL,
     PRIMARY KEY(dataset, key)) WITHOUT ROWID`,
@@ -70,6 +70,15 @@ export const MIGRATIONS: string[][] = [[
   "CREATE TABLE queue(id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, priority INTEGER NOT NULL, step TEXT NOT NULL)",
   ...TYPED.map(typedDdl),
   "CREATE INDEX activities_day ON activities(day)",
+], [
+  // Activity files and R2 are gone: the files table, queued file steps (queue.step is JSON.stringify of the Step)
+  // and {"r2_key","bytes"} stubs of JSON moved to R2. Repair re-queues activity_detail/activity_workouts (up to
+  // 20 activities a day); other items over 256 KB were never seen and return only if sync loads that day again.
+  "DROP TABLE files",
+  `DELETE FROM queue WHERE step LIKE '%"kind":"activity_file"%'`,
+  // Runs in the constructor under the 10 ms CPU limit: octet_length reads only the row header, so large rows are
+  // not loaded or parsed; a stub {"r2_key":"u/<64 hex>/json/<ds>/<key>.json","bytes":N} is under 200 bytes
+  `DELETE FROM records WHERE octet_length(data) < 300 AND data LIKE '{"r2_key":%'`,
 ]];
 
 export function migrate(storage: DurableObjectStorage): void {

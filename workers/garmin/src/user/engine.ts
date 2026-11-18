@@ -3,15 +3,15 @@ import { addDays } from "../garmin/dates";
 import { GarminHttpError, TOKEN_PATH, type GarminClient } from "../garmin/client";
 import { TYPED } from "./schema";
 import {
-  allStates, incompleteActivities, missingPieces, patchState, putFile, upsertRecords, type Pieces, type SyncState,
+  allStates, incompleteActivities, missingPieces, patchState, upsertRecords, type Pieces, type SyncState,
 } from "./store";
 
-// fetchStep: network and R2, no SQL; applyStep: synchronous SQL only. Nothing here logs.
+// fetchStep: network only, no SQL; applyStep: synchronous SQL only. Nothing here logs.
 
 export type Step =
   | { kind: "dataset"; id: DatasetId; start: string; end: string; backfill: boolean }
   | { kind: "activities"; start: number; limit: number; backfill: boolean }
-  | { kind: "activity_detail" | "activity_workouts" | "activity_file"; activityId: string }
+  | { kind: "activity_detail" | "activity_workouts"; activityId: string }
   | { kind: "history_start"; start: string; end: string };
 type DatasetStep = Extract<Step, { kind: "dataset" }>;
 type ActivitiesStep = Extract<Step, { kind: "activities" }>;
@@ -22,7 +22,7 @@ type HistoryStep = Extract<Step, { kind: "history_start" }>;
  * runs, the start of the next year to check), backfill_done_at means the search is finished
  */
 export const HISTORY = "_history";
-export const BACKFILL_FLOOR = "2000-01-01", MAX_INLINE_JSON = 256_000;
+export const BACKFILL_FLOOR = "2000-01-01";
 const ERROR_SKIP_MS = 3_600_000, REPAIR_ACTIVITIES = 20;
 
 export const BACKFILL_ORDER: (DatasetId | "activity")[] = [
@@ -30,11 +30,8 @@ export const BACKFILL_ORDER: (DatasetId | "activity")[] = [
   "heart_rate", "spo2", "hydration", "wellness_activity", "nutrition", "fitness_age", "cycle_summary", "cycle_day",
 ];
 
-export interface FetchDeps { client: GarminClient; files: R2Bucket; prefix: string; today: string }
-export type Fetched =
-  | { ok: true; items: Item[] }
-  | { ok: true; file: { r2Key: string | null; status: number; bytes: number | null } }
-  | { ok: false; status: number; emptyBody: boolean };
+export interface FetchDeps { client: GarminClient; today: string }
+export type Fetched = { ok: true; items: Item[] } | { ok: false; status: number; emptyBody: boolean };
 export interface StepResult { newSteps: Step[]; rowsWritten: number }
 
 /**
@@ -48,7 +45,7 @@ export function stepKey(s: Step): string {
   return `${s.kind}:${s.activityId}`;
 }
 
-/** For logs: "dataset:<id>", "activities", "activity_detail" | "activity_workouts" | "activity_file" */
+/** For logs: "dataset:<id>", "activities", "activity_detail" | "activity_workouts" */
 export function stepLabel(s: Step): string {
   return s.kind === "dataset" ? `dataset:${s.id}` : s.kind;
 }
@@ -61,7 +58,6 @@ export function stateKey(s: Step): string {
 const ACTIVITY_PATH = {
   activity_detail: (id: string) => `/activity-service/activity/${id}`,
   activity_workouts: (id: string) => `/activity-service/activity/${id}/workouts`,
-  activity_file: (id: string) => `/download-service/files/activity/${id}`,
 };
 
 type Row = Record<string, unknown>;
@@ -83,9 +79,6 @@ export async function fetchStep(deps: FetchDeps, step: Step): Promise<Fetched> {
     return await fetchOk(deps, step);
   } catch (e) {
     if (!(e instanceof GarminHttpError) || e.status === 401 || e.path === TOKEN_PATH) throw e;
-    if (step.kind === "activity_file" && e.status >= 400 && e.status < 500) {
-      return { ok: true, file: { r2Key: null, status: e.status, bytes: null } };
-    }
     return { ok: false, status: e.status, emptyBody: e.emptyBody };
   }
 }
@@ -96,7 +89,7 @@ async function fetchOk(deps: FetchDeps, step: Step): Promise<Fetched> {
     case "dataset": {
       const d = dataset(step.id);
       const json = await client.get(d.path(step.start, step.end, deps.today));
-      return { ok: true, items: await offload(deps, step.id, d.items(json, step.start, step.end)) };
+      return { ok: true, items: d.items(json, step.start, step.end) };
     }
     case "history_start": {
       const d = dataset("daily_summary_v2");
@@ -104,47 +97,18 @@ async function fetchOk(deps: FetchDeps, step: Step): Promise<Fetched> {
     }
     case "activities": {
       const json = await client.get(`/activitylist-service/activities/search/activities?start=${step.start}&limit=${step.limit}`);
-      return { ok: true, items: await offload(deps, "activity", activityItems(json)) };
+      return { ok: true, items: activityItems(json) };
     }
     case "activity_detail": {
       const json = (await client.get(ACTIVITY_PATH.activity_detail(step.activityId))) ?? {};
       const item = { key: step.activityId, day: day10(rec(rec(json).summaryDTO).startTimeLocal), data: json };
-      return { ok: true, items: await offload(deps, step.kind, [item]) };
+      return { ok: true, items: [item] };
     }
     case "activity_workouts": {
       const json = (await client.get(ACTIVITY_PATH.activity_workouts(step.activityId))) ?? [];
-      return { ok: true, items: await offload(deps, step.kind, [{ key: step.activityId, day: null, data: json }]) };
-    }
-    case "activity_file": {
-      const buf = await client.download(ACTIVITY_PATH.activity_file(step.activityId));
-      const r2Key = `${deps.prefix}activities/${step.activityId}.zip`;
-      await deps.files.put(r2Key, buf, { httpMetadata: { contentType: "application/zip" } });
-      return { ok: true, file: { r2Key, status: 200, bytes: buf.byteLength } };
+      return { ok: true, items: [{ key: step.activityId, day: null, data: json }] };
     }
   }
-}
-
-/** R2 objects written by fetchStep: the activity file and JSON moved out by offload */
-export function fetchedFiles(f: Fetched): string[] {
-  if (!f.ok) return [];
-  if ("file" in f) return f.file.r2Key ? [f.file.r2Key] : [];
-  return f.items.map((i) => rec(i.data).r2_key).filter((k): k is string => typeof k === "string");
-}
-
-/** JSON longer than MAX_INLINE_JSON goes to R2; items keep a stub { r2_key, bytes } */
-async function offload(deps: FetchDeps, ds: string, items: Item[]): Promise<Item[]> {
-  const out: Item[] = [];
-  for (const it of items) {
-    const json = JSON.stringify(it.data);
-    if (json.length <= MAX_INLINE_JSON) {
-      out.push(it);
-      continue;
-    }
-    const r2_key = `${deps.prefix}json/${ds}/${it.key}.json`;
-    await deps.files.put(r2_key, json, { httpMetadata: { contentType: "application/json" } });
-    out.push({ ...it, data: { r2_key, bytes: new TextEncoder().encode(json).byteLength } });
-  }
-  return out;
 }
 
 /** Synchronous, SQL only; rowsWritten is the total of all the step's writes. */
@@ -153,12 +117,8 @@ export function applyStep(sql: SqlStorage, step: Step, f: Fetched, now: Date, to
   if (step.kind === "dataset") return applyDataset(sql, step, f, at);
   if (step.kind === "history_start") return applyHistory(sql, step, f, at, today);
   if (!f.ok) return failed(sql, step, f.status, at);
-  if (step.kind === "activity_file") {
-    return done("file" in f ? putFile(sql, { activityId: step.activityId, ...f.file, fetchedAt: at }) : 0);
-  }
-  const items = "items" in f ? f.items : [];
-  if (step.kind === "activities") return applyActivities(sql, step, items, at);
-  return done(upsertRecords(sql, step.kind, items, at));
+  if (step.kind === "activities") return applyActivities(sql, step, f.items, at);
+  return done(upsertRecords(sql, step.kind, f.items, at));
 }
 
 const done = (rowsWritten: number, newSteps: Step[] = []): StepResult => ({ newSteps, rowsWritten });
@@ -179,8 +139,7 @@ function applyDataset(sql: SqlStorage, s: DatasetStep, f: Fetched, at: string): 
   // w == 1: an empty 400 is a day without data; an empty 500 is a failure and must not "finish" the backfill
   if (!f.ok && !dayMiss && !(rangeMiss && f.status === 400)) return failed(sql, s, f.status, at);
 
-  const items = f.ok && "items" in f ? f.items : [];
-  let n = upsertRecords(sql, s.id, items, at);
+  let n = upsertRecords(sql, s.id, f.ok ? f.items : [], at);
   if (!s.backfill) return done(n + patchState(sql, s.id, { last_success_at: at, last_error: null }));
   const cursor = addDays(s.start, -1);
   const floor = states?.get(HISTORY)?.backfill_cursor ?? BACKFILL_FLOOR;
@@ -197,7 +156,7 @@ const HISTORY_SETS = JSON.stringify(DATASETS.filter((d) => d.kind !== "static").
  */
 function applyHistory(sql: SqlStorage, s: HistoryStep, f: Fetched, at: string, today: string): StepResult {
   if (!f.ok && (f.status < 400 || f.status >= 500)) return failed(sql, s, f.status, at);
-  const first = f.ok && "items" in f ? f.items.map((i) => i.day!).sort()[0] : undefined;
+  const first = f.ok ? f.items.map((i) => i.day!).sort()[0] : undefined;
   const found = first ?? (s.end >= addDays(today, -1) ? today : undefined);
   if (!found) return done(patchState(sql, HISTORY, { backfill_cursor: addDays(s.end, 1) }));
   const stored = sql.exec<{ d: string | null }>("SELECT min(day) AS d FROM records WHERE dataset = 'daily_summary_v2'").one().d;

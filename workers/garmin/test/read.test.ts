@@ -30,7 +30,7 @@ describe("checkReadOnlySql", () => {
   it("rejects writes, extra statements and unterminated text", () => {
     for (const s of ["DELETE FROM records", "WITH a AS (SELECT 1) INSERT INTO records VALUES (1,1,1,1,1)",
       "SELECT 1; DROP TABLE records", "PRAGMA table_info(records)",
-      "SELECT 1); INSERT INTO files VALUES ('x',NULL,0,0,'t'); SELECT (1", "UPDATE sync_state SET last_error='x'",
+      "SELECT 1); INSERT INTO queue VALUES (1,'x',0,'t'); SELECT (1", "UPDATE sync_state SET last_error='x'",
       "WITH a AS (SELECT 1) REPLACE INTO records VALUES (1,1,1,1,1)", "SELECT 1;;", "(SELECT 1)", "EXPLAIN SELECT 1",
       "SELECT 1 /* open", "SELECT 'open", "SELECT 1 /* ; */ ; DELETE FROM records", "WITH x AS (DELETE FROM t RETURNING *) SELECT 1",
       "SELECT 1\0", ""])
@@ -177,17 +177,16 @@ describe("queries", () => {
     expect(r).toEqual([{ restingHeartRate: 58, heartRateValues: [[1, null]] }, null]);
   });
 
-  it("getActivity reads the detail from R2 and drops splits on request", async () => {
-    const r2Key = `u/${crypto.randomUUID()}/json/activity_detail/9.json`;
-    await env.FILES.put(r2Key, JSON.stringify({ summaryDTO: { distance: 5000 }, splitSummaries: [{ n: 1 }], empty: null }));
-    const r = await inDo(async (sql) => {
+  it("getActivity drops splits on request", async () => {
+    const r = await inDo((sql) => {
       upsertRecords(sql, "activity", [{ key: "9", day: "2026-10-27", data: { activityName: "Run" } }], T);
-      upsertRecords(sql, "activity_detail", [{ key: "9", day: "2026-10-27", data: { r2_key: r2Key, bytes: 300_000 } }], T);
+      upsertRecords(sql, "activity_detail", [{ key: "9", day: "2026-10-27",
+        data: { summaryDTO: { distance: 5000 }, splitSummaries: [{ n: 1 }], empty: null } }], T);
       upsertRecords(sql, "activity_workouts", [{ key: "9", day: null, data: [{ workoutId: 1 }] }], T);
       return {
-        lean: await getActivity(sql, env.FILES, "9", { includeSplits: false, includeWorkout: false }),
-        full: await getActivity(sql, env.FILES, "9", { includeSplits: true, includeWorkout: true }),
-        none: await getActivity(sql, env.FILES, "404", { includeSplits: true, includeWorkout: true }),
+        lean: getActivity(sql, "9", { includeSplits: false, includeWorkout: false }),
+        full: getActivity(sql, "9", { includeSplits: true, includeWorkout: true }),
+        none: getActivity(sql, "404", { includeSplits: true, includeWorkout: true }),
       };
     });
     expect(r.lean).toEqual({ activity_id: "9", summary: { activityName: "Run" }, detail: { summaryDTO: { distance: 5000 } } });

@@ -2,8 +2,8 @@ import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vitest";
 import { addDays } from "../src/garmin/dates";
-import { MIGRATIONS } from "../src/user/schema";
-import { allStates, incompleteActivities, missingPieces, patchState, putFile, upsertRecords } from "../src/user/store";
+import { migrate, MIGRATIONS } from "../src/user/schema";
+import { allStates, incompleteActivities, MAX_RECORD_JSON, missingPieces, patchState, upsertRecords } from "../src/user/store";
 
 const T = "2026-10-28T00:00:00.000Z";
 const newStub = () => env.USER_DO.getByName(`t-${crypto.randomUUID()}@x`);
@@ -22,6 +22,46 @@ it("migrate is idempotent across eviction", async () => {
     hrv: sql.exec("SELECT day, hrv_last_night FROM hrv").toArray(),
   }));
   expect(r).toEqual({ v: MIGRATIONS.length, rows: [{ key: "2026-10-27" }], hrv: [{ day: "2026-10-27", hrv_last_night: 50 }] });
+});
+
+it("v2 drops the files table, queued file steps and R2 stubs, and keeps the rest", async () => {
+  const r = await inDo(newStub(), (sql, st) => {
+    // a v1 store as the old code left it
+    sql.exec("DELETE FROM _schema WHERE version > 1");
+    sql.exec(MIGRATIONS[0].find((s) => s.includes("TABLE files("))!);
+    sql.exec("INSERT INTO files VALUES ('7', 'u/x/activities/7.zip', 200, 4, ?)", T);
+    for (const step of [{ kind: "activity_file", activityId: "7" }, { kind: "activity_detail", activityId: "7" }]) {
+      sql.exec("INSERT INTO queue(key, priority, step) VALUES (?, 1, ?)", `${step.kind}:7`, JSON.stringify(step));
+    }
+    upsertRecords(sql, "activity_detail", [{ key: "7", day: null, data: { r2_key: "u/x/json/activity_detail/7.json", bytes: 300_000 } }], T);
+    upsertRecords(sql, "activity_detail", [{ key: "8", day: null, data: { activityId: 8 } }], T);
+    upsertRecords(sql, "activity_workouts", [{ key: "8", day: null, data: [] }], T);
+    upsertRecords(sql, "hrv", [day("2026-10-27", { hrvSummary: { lastNightAvg: 50 } })], T);
+    migrate(st.storage);
+    return {
+      v: sql.exec("SELECT max(version) AS v FROM _schema").one().v,
+      files: sql.exec("SELECT name FROM sqlite_master WHERE name = 'files'").toArray(),
+      queue: sql.exec("SELECT key FROM queue").toArray(),
+      records: sql.exec("SELECT dataset, key FROM records ORDER BY dataset, key").toArray(),
+    };
+  });
+  expect(r).toEqual({
+    v: 2, files: [], queue: [{ key: "activity_detail:7" }],
+    records: [{ dataset: "activity_detail", key: "8" }, { dataset: "activity_workouts", key: "8" }, { dataset: "hrv", key: "2026-10-27" }],
+  });
+});
+
+it("an item over MAX_RECORD_JSON is stored as a size marker", async () => {
+  const str = (jsonLength: number, ch = "x") => ch.repeat(jsonLength - 2); // JSON.stringify adds two quotes
+  const r = await inDo(newStub(), (sql) => {
+    upsertRecords(sql, "heart_rate", [day("2026-10-26", str(MAX_RECORD_JSON)), day("2026-10-27", str(MAX_RECORD_JSON + 1, "é"))], T);
+    return sql.exec<{ key: string; data: string }>("SELECT key, data FROM records ORDER BY key").toArray()
+      .map((x) => [x.key, x.data.length > 100 ? x.data.length : JSON.parse(x.data)]);
+  });
+  expect(r).toEqual([
+    ["2026-10-26", MAX_RECORD_JSON],
+    ["2026-10-27", { omitted: "too_large", bytes: 2 * MAX_RECORD_JSON }], // UTF-8 bytes: é is 2 bytes, quotes 1 each
+  ]);
 });
 
 it("upsert replaces by (dataset,key); unchanged data writes 0 rows", async () => {
@@ -82,20 +122,18 @@ it("states", async () => {
   });
 });
 
-const ALL = ["activity_detail", "activity_workouts", "activity_file"];
+const ALL = ["activity_detail", "activity_workouts"];
 
 it("missingPieces", async () => {
   const r = await inDo(newStub(), (sql) => {
     upsertRecords(sql, "activity_detail", [{ key: "2", day: null, data: { activityId: 2 } }], T);
     upsertRecords(sql, "activity_workouts", [{ key: "3", day: null, data: [] }], T);
-    putFile(sql, { activityId: "3", r2Key: null, status: 404, bytes: null, fetchedAt: T }); // 4xx: no file is an answer
-    putFile(sql, { activityId: "4", r2Key: "u/x/activities/4.zip", status: 200, bytes: 1, fetchedAt: T });
     upsertRecords(sql, "activity_detail", [{ key: "4", day: null, data: {} }], T);
     upsertRecords(sql, "activity_workouts", [{ key: "4", day: null, data: [] }], T);
     return [missingPieces(sql, ["1", "2", "3", "4"]), missingPieces(sql, ["3", "1"]), missingPieces(sql, [])];
   });
   expect(r).toEqual([
-    [{ id: "1", missing: ALL }, { id: "2", missing: ["activity_workouts", "activity_file"] },
+    [{ id: "1", missing: ALL }, { id: "2", missing: ["activity_workouts"] },
       { id: "3", missing: ["activity_detail"] }, { id: "4", missing: [] }],
     [{ id: "3", missing: ["activity_detail"] }, { id: "1", missing: ALL }],
     [],
@@ -110,24 +148,14 @@ it("incompleteActivities: newest first, complete ones skipped, bounded", async (
     for (const k of ["5", "3"]) {
       upsertRecords(sql, "activity_detail", [{ key: k, day: null, data: {} }], T);
       upsertRecords(sql, "activity_workouts", [{ key: k, day: null, data: [] }], T);
-      putFile(sql, { activityId: k, r2Key: null, status: 404, bytes: null, fetchedAt: T });
     }
-    putFile(sql, { activityId: "4", r2Key: null, status: 500, bytes: null, fetchedAt: T });
+    upsertRecords(sql, "activity_workouts", [{ key: "4", day: null, data: [] }], T);
     return [incompleteActivities(sql, 3), incompleteActivities(sql, 10).map((a) => a.id)];
   });
   expect(r).toEqual([
-    [{ id: "6", missing: ALL }, { id: "4", missing: ["activity_detail", "activity_workouts"] }, { id: "2", missing: ALL }],
+    [{ id: "6", missing: ALL }, { id: "4", missing: ["activity_detail"] }, { id: "2", missing: ALL }],
     ["6", "4", "2", "1"],
   ]);
-});
-
-it("files upsert by activity_id", async () => {
-  const r = await inDo(newStub(), (sql) => {
-    putFile(sql, { activityId: "1", r2Key: null, status: 404, bytes: null, fetchedAt: T });
-    putFile(sql, { activityId: "1", r2Key: "u/x/activities/1.zip", status: 200, bytes: 10, fetchedAt: T });
-    return sql.exec("SELECT * FROM files").toArray();
-  });
-  expect(r).toEqual([{ activity_id: "1", r2_key: "u/x/activities/1.zip", status: 200, bytes: 10, fetched_at: T }]);
 });
 
 it("kv is not reachable from SQL", async () => {

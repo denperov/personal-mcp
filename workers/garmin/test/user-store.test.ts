@@ -9,7 +9,7 @@ import { addDays } from "../src/garmin/dates";
 import { GARMIN_BASE } from "../src/garmin/client";
 import { importKek, open, seal, type Sealed } from "../src/user/crypto";
 import { BACKFILL_FLOOR, BACKFILL_ORDER, HISTORY, nextBackfillStep } from "../src/user/engine";
-import { allStates, patchState, putFile, upsertRecords } from "../src/user/store";
+import { allStates, patchState, upsertRecords } from "../src/user/store";
 import { KEY_PAUSE_MS, kickOffset, nextKickTime, ROWS_WRITTEN_BUDGET } from "../src/user/user-store";
 
 // workerd alarms run on the real clock: everything UserStore sets is no earlier than now + STEP_GAP_MS (1 h in tests)
@@ -127,21 +127,18 @@ it("daily kick re-queues missing pieces of the 20 newest incomplete activities (
   await inDo(stub, (sql, st) => {
     backfillDone(sql);
     st.storage.kv.put("lastDailyAt", at);
-    // 1…25 one per day; 25 complete, 24 without workouts (file 404 counts as fetched), 23 file only, the rest empty
+    // 1…25 one per day; 25 complete, 24 without workouts, 23 workouts only, the rest empty
     upsertRecords(sql, "activity", Array.from({ length: 25 }, (_, i) => ({ key: String(i + 1), day: day(i), data: {} })), T);
     for (const k of ["25", "24"]) upsertRecords(sql, "activity_detail", [{ key: k, day: null, data: {} }], T);
-    upsertRecords(sql, "activity_workouts", [{ key: "25", day: null, data: [] }], T);
-    putFile(sql, { activityId: "25", r2Key: "x", status: 200, bytes: 1, fetchedAt: T });
-    putFile(sql, { activityId: "24", r2Key: null, status: 404, bytes: null, fetchedAt: T });
-    putFile(sql, { activityId: "23", r2Key: "y", status: 200, bytes: 1, fetchedAt: T });
+    for (const k of ["25", "23"]) upsertRecords(sql, "activity_workouts", [{ key: k, day: null, data: [] }], T);
   });
   const pieces = async () => (await queueKeys(stub)).filter((k) => k.startsWith("activity_")).sort();
   await stub.kick(at); // the hourly run does not touch them
   expect(await pieces()).toEqual([]);
   await stub.kick(at + 23 * HOUR + 1);
   const full = Array.from({ length: 18 }, (_, i) => String(i + 5)) // 5…22
-    .flatMap((k) => ["activity_detail", "activity_workouts", "activity_file"].map((p) => `${p}:${k}`));
-  expect(await pieces()).toEqual(["activity_workouts:24", "activity_detail:23", "activity_workouts:23", ...full].sort());
+    .flatMap((k) => ["activity_detail", "activity_workouts"].map((p) => `${p}:${k}`)); // no activity_file pieces
+  expect(await pieces()).toEqual(["activity_workouts:24", "activity_detail:23", ...full].sort());
 });
 
 it("Garmin requests never overlap", async () => {
@@ -300,7 +297,6 @@ it("Garmin token never reaches SQL", async () => {
     data: {
       ...DAILY,
       "/activitylist-service/": [{ activityId: 7, startTimeLocal: "2026-10-27 07:00:00" }],
-      "/download-service/": () => new HttpResponse(new Uint8Array([80, 75, 3, 4])),
     },
   });
   network.use(...m.handlers);
@@ -316,8 +312,8 @@ it("Garmin token never reaches SQL", async () => {
   expect(token.split(".")).toHaveLength(3);
   expect(JSON.stringify(sealed)).not.toContain(token.split(".")[1]);
   const dump = await inDo(stub, (sql) =>
-    JSON.stringify(["records", "sync_state", "files", "queue"].map((t) => sql.exec(`SELECT * FROM ${t}`).toArray())));
-  expect(dump).toContain("activities/7.zip");
+    JSON.stringify(["records", "sync_state", "queue"].map((t) => sql.exec(`SELECT * FROM ${t}`).toArray())));
+  expect(dump).toContain("2026-10-27 07:00:00"); // the activity is there
   expect(dump).not.toContain(token);
   expect(dump).not.toContain(token.split(".")[1]);
   // one log line per step, only {"step":"<label>"}
@@ -690,30 +686,31 @@ it("deleteKey during a step: the step writes nothing back", async () => {
   expect(await inDo(stub, (sql) => sql.exec("SELECT dataset FROM sync_state").toArray())).toEqual([]);
 });
 
-it("delete all during a file step: the file does not outlive the wipe", async () => {
+it("delete all during a step: the step writes nothing back", async () => {
   let inFetch = false, released = false; // flags, as in "deleteKey during a step"
   network.use(
-    http.get(`${GARMIN_BASE}/download-service/*`, async () => {
+    http.get(`${GARMIN_BASE}/*`, async () => {
       inFetch = true;
       while (!released) await delay(5);
-      return new HttpResponse(new Uint8Array([80, 75, 3, 4]));
+      return HttpResponse.json({ activityId: 7 });
     }),
     ...garminMock().handlers,
   );
   const stub = newStub();
   await putTestKey(stub);
-  const prefix = await inDo(stub, (sql, st) => {
-    sql.exec("INSERT INTO queue(key, priority, step) VALUES ('activity_file:7', 0, ?)",
-      JSON.stringify({ kind: "activity_file", activityId: "7" }));
-    return `u/${st.id.toString()}/`;
-  });
+  await inDo(stub, (sql) => sql.exec("INSERT INTO queue(key, priority, step) VALUES ('activity_detail:7', 0, ?)",
+    JSON.stringify({ kind: "activity_detail", activityId: "7" })));
   await armAlarm(stub);
   const run = runDurableObjectAlarm(stub);
   while (!inFetch) await new Promise((r) => setTimeout(r, 5));
-  expect(await stub.deleteAllData()).toEqual({ done: true }); // no file yet: list is empty
+  await stub.deleteAllData();
   released = true;
   await run;
-  expect((await env.FILES.list({ prefix })).objects).toEqual([]);
+  expect(await inDo(stub, (sql, st) => ({
+    kv: [...st.storage.kv.list()], // no token, no row counter
+    rows: sql.exec("SELECT (SELECT COUNT(*) FROM records) + (SELECT COUNT(*) FROM sync_state) AS n").one().n,
+  }))).toEqual({ kv: [], rows: 0 });
+  expect(await alarmAt(stub)).toBeNull();
 });
 
 it("no key: alarm does nothing", async () => {
@@ -760,18 +757,17 @@ it("touch arms a missing alarm", async () => {
   expect(at).toBeLessThan(Date.now() + gap + 1000);
 });
 
-it("deleteAllData empties the R2 prefix and storage", async () => {
+it("deleteAllData clears everything in one call", async () => {
   const stub = newStub();
   await putTestKey(stub);
-  const prefix = await inDo(stub, (_s, st) => `u/${st.id.toString()}/`);
-  for (const n of ["a", "b", "c"]) await env.FILES.put(`${prefix}${n}`, "x");
-  await env.FILES.put(`u/other/${crypto.randomUUID()}`, "x");
+  await stub.syncNow(["2026-10-27"]); // queue and alarm
   await inDo(stub, (sql) => upsertRecords(sql, "daily_summary", [{ key: "2026-10-27", day: "2026-10-27", data: { a: 1 } }], "t"));
-  expect(await stub.deleteAllData()).toEqual({ done: true });
-  expect((await env.FILES.list({ prefix })).objects).toEqual([]);
-  expect((await env.FILES.list({ prefix: "u/other/" })).objects).toHaveLength(1);
-  expect(await inDo(stub, (sql) => sql.exec("SELECT 1 FROM records").toArray())).toEqual([]);
-  expect(await kvGet(stub, "garminKey")).toBeUndefined();
+  await stub.deleteAllData();
+  expect(await inDo(stub, (sql, st) => ({
+    kv: [...st.storage.kv.list()],
+    rows: sql.exec("SELECT (SELECT COUNT(*) FROM records) + (SELECT COUNT(*) FROM daily) + (SELECT COUNT(*) FROM queue) AS n").one().n,
+  }))).toEqual({ kv: [], rows: 0 });
+  expect(await alarmAt(stub)).toBeNull();
 });
 
 it("settingsState maps key states", async () => {

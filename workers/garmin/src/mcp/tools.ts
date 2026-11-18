@@ -14,7 +14,7 @@ import { checkReadOnlySql, readOnlyQuery } from "./sqlguard";
 // Runs inside the user's DO. Arguments are validated here (the RPC boundary), even if McpServer has already parsed them.
 
 export interface ToolContext {
-  storage: DurableObjectStorage; sql: SqlStorage; files: R2Bucket; now: Date; keyExpiresAt: string; hasKey: boolean; settingsUrl: string;
+  storage: DurableObjectStorage; sql: SqlStorage; now: Date; keyExpiresAt: string; hasKey: boolean; settingsUrl: string;
   syncNow(dates: string[]): Promise<{ queued: number; etaSeconds: number }>; queueSize(): number;
 }
 export interface ToolDef {
@@ -98,7 +98,7 @@ export const TOOLS: ToolDef[] = [
       "Raw Garmin units: distance in meters, duration in seconds, speed in m/s; data is null for an unknown id.",
     input: { activity_id: z.string().min(1), include_splits: z.boolean().default(true), include_workout: z.boolean().default(true) },
     warn: () => ["activity"],
-    run: (c, a) => getActivity(c.sql, c.files, a.activity_id, { includeSplits: a.include_splits, includeWorkout: a.include_workout }),
+    run: (c, a) => getActivity(c.sql, a.activity_id, { includeSplits: a.include_splits, includeWorkout: a.include_workout }),
   }),
   tool({
     name: "get_intraday",

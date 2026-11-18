@@ -133,7 +133,7 @@ Workers Free quotas are shared by the whole account and all servers; daily quota
 - per day: 100,000 Workers requests, 100,000 Durable Object requests (every alarm and RPC), 13,000 GB-s of
   Durable Object duration, Durable Object SQLite 5 million rows read and 100,000 rows written (once exhausted,
   every write fails until 00:00 UTC);
-- 5 GB of Durable Object storage per account, 10 GB of R2;
+- 5 GB of Durable Object storage per account;
 - Zero Trust Free: up to 50 users.
 
 A service binding call is not a separate request, but CPU counts per invocation: gateway `fetch`, RPC `handle`,
@@ -157,7 +157,7 @@ field `cpuTime`) before raising them.
 - Isolation: both entry points (`mcp/server.ts`, `settings/route.ts`) open only the Durable Object named by the
   verified email, so no tool or page reaches another person's data, the account owner's included. The owner can
   still read any object in the dashboard's Durable Objects Data Studio (needs Workers Platform Admin; queries are
-  audit-logged) and the files in R2. Garmin keys stay encrypted there.
+  audit-logged). Garmin keys stay encrypted there.
 - Garmin has a single admission layer, the Access policy: a wrong policy would let any Google account in.
 - Errors go out without internals: an HTTP status or an error name. The exceptions are input-validation
   messages and SQLite's message about the caller's own `query_sql` query. Logs are structured lines without
@@ -198,7 +198,6 @@ writing to Garmin, the unofficial Garmin API, a view across users.
 ```
 gateway ─RPC handle(request, email)─▶ personal-mcp-garmin: /mcp, /settings
   ─▶ Durable Object UserStore per lower(email): SQLite, kv, alarm() for all sync traffic
-  ─▶ R2 garmin-files, prefix u/<DO id>/
 ```
 
 ### Source: Garmin Connect Personal API
@@ -218,13 +217,16 @@ and windows: `workers/garmin/src/garmin/catalog.ts`.
 
 ### Storage
 
-One SQLite Durable Object `UserStore` per user, named `lower(email)`. The R2 bucket `garmin-files` is shared and
-split by the prefix `u/<DO id>/`; the first deploy creates it if it does not exist (wrangler provisions an R2
-binding by its `bucket_name`; R2 must be enabled on the account, and the Edit Cloudflare Workers token template
-includes R2 Storage Write).
+One SQLite Durable Object `UserStore` per user, named `lower(email)`, holds all of the user's data. There is no
+other storage, so an install needs no R2 checkout, which asks for payment details.
 
 - `records` keeps Garmin's JSON with no field selection, one row per dataset and key. A row is rewritten only
   when its data changed, so refetching unchanged days writes no rows.
+- An item whose JSON is longer than `MAX_RECORD_JSON` (`store.ts`) is stored as
+  `{"omitted":"too_large","bytes":…}`. The row still exists, so the step is not refetched forever. SQLite allows
+  8 MB per row; the lower cap limits the CPU of reading and parsing one row.
+- Activity files (FIT) are not stored: they hold GPS tracks, device serial numbers and the daily routine, no
+  tool read them, and Garmin keeps the originals.
 - Typed tables (`daily`, `sleep`, `hrv`, `weight`, `activities`) are a projection of `records`, rewritten in the
   same transaction; their columns are defined once, in `TYPED` (`schema.ts`). Migration 1 is generated from the
   current `TYPED`, so before changing a typed table freeze migration 1 as literal DDL, then add a migration that
@@ -232,8 +234,10 @@ includes R2 Storage Write).
   objects create it twice (the `ALTER` fails).
 - `sync_state` stores errors as an HTTP status or error name only: messages can carry pieces of Garmin
   responses. Its column `empty_streak_days` is unused.
-- R2 holds activity files and any JSON too large for a row; `records.data` then holds a `{r2_key, bytes}` stub
-  that every reader must resolve.
+- Migration 2 removes what earlier versions kept for R2: it drops `files`, deletes queued file steps and deletes
+  `records` rows that held an `r2_key` stub. The daily repair refetches the activity pieces among them, up to 20
+  activities a day; other stubs (any other item over 256 KB) were never seen and return only if sync loads that
+  day again.
 
 The sealed key, the token and the counters live in `ctx.storage.kv`, which SQL cannot reach. Sealing is
 AES-GCM-256 under the secret `KEY_ENCRYPTION_KEY` with the Durable Object id as additional data, so a ciphertext
@@ -281,7 +285,7 @@ The token is cached sealed and reused while more than an hour remains; a token i
 
 ### MCP tools
 
-Tools only read SQLite and R2; only `sync_now` queues work. Every call is a visit, so even reads may write a few
+Tools only read SQLite; only `sync_now` queues work. Every call is a visit, so even reads may write a few
 rows. Arguments and limits are in `workers/garmin/src/mcp/tools.ts`, whose descriptions are what Claude sees.
 
 - `get_day`: one day's synced data, without intraday arrays.
@@ -314,9 +318,8 @@ confirmation. Actions are form POSTs, accepted only when `Origin` equals the req
 
 - Save validates the key with one token exchange and stores nothing on failure. The person also picks the
   validity chosen in Garmin Connect: expiry warnings come from that choice, not from Garmin.
-- Delete key stops sync and keeps the data. Delete all removes the R2 files (over several presses if there are
-  many), then all of the object's storage. A step waiting on Garmin meanwhile finds the key gone, writes
-  nothing and deletes the R2 objects it just stored.
+- Delete key stops sync and keeps the data. Delete all erases all of the object's storage and its alarm in one
+  press. A step waiting on Garmin meanwhile finds the key gone and writes nothing.
 
 ### Encryption key and operations
 
@@ -335,11 +338,9 @@ Keys expire and renewal is manual: Garmin emails about a week ahead, tool answer
   the watch fills it.
 - Garmin's FAQ: the API is "not intended for commercial applications serving multiple end users". Accepted: a
   small non-commercial circle, each person with their own key.
-- Garmin strips undocumented FIT fields for third parties.
-- A user's data is about 70–130 MB; one Durable Object is budgeted for up to 1 GB. If all of it is Durable
-  Object storage, 5 GB holds about 40–70 people, possibly fewer than the 50 Zero Trust seats.
-- Health data lives in the Durable Objects and R2 of your Cloudflare account; encryption at rest is
-  Cloudflare's.
+- A user's data is about 70–130 MB, all of it in Durable Object storage; one Durable Object is budgeted for up to
+  1 GB. 5 GB holds about 40–70 people, possibly fewer than the 50 Zero Trust seats.
+- Health data lives in the Durable Objects of your Cloudflare account; encryption at rest is Cloudflare's.
 
 ## Settings UI
 
@@ -367,6 +368,7 @@ first (a shared module once a second server needs it). The gateway's public page
 - **Accessibility.** Every input has a label; every icon button has an `aria-label` and a `title`; an error is
   linked to its control by `aria-describedby`; state is shown by icon or text, never by color alone; the
   `:focus-visible` rule must cover every interactive element; no motion.
-- **Copy.** English, sentence case, plain verbs; one verb runs through a flow ("Delete all" on the
-  button, in its confirmation and in "Press Delete all again"). Errors say what happened and what to do next, never apologize. No middle dots, arrows, all caps
-  or exclamation marks. Times carry a "UTC" suffix: the page does not know the person's time zone.
+- **Copy.** English, sentence case, plain verbs; one verb runs through a flow ("Delete" on the Delete all button
+  and in its confirmation). Errors say what happened and what to do next, never apologize. No middle dots,
+  arrows, all caps or exclamation marks. Times carry a "UTC" suffix: the page does not know the person's time
+  zone.

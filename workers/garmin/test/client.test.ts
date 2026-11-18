@@ -168,20 +168,6 @@ describe("GarminClient", () => {
     expect(store.get()).toBeUndefined();
   });
 
-  it("download sends zip Accept", async () => {
-    let accept = "";
-    network.use(
-      http.get(`${GARMIN_BASE}/download-service/*`, ({ request }) => {
-        accept = request.headers.get("accept")!;
-        return new HttpResponse(new Uint8Array([80, 75, 3, 4]));
-      }),
-      ...garminMock().handlers,
-    );
-    const buf = await new GarminClient("test-key", memStore()).download("/download-service/files/activity/1");
-    expect([...new Uint8Array(buf)]).toEqual([80, 75, 3, 4]);
-    expect(accept).toBe("application/zip, application/x-zip-compressed, application/octet-stream");
-  });
-
   it("hung request times out", async () => {
     network.use(http.get(`${GARMIN_BASE}/hang`, async () => { await delay("infinite"); }), ...garminMock().handlers);
     const t0 = Date.now();

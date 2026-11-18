@@ -155,19 +155,20 @@ it("delete-key keeps the data and shows the setup steps plus the Delete all data
   expect(page).toContain("Not connected");
   expect(page).toContain("Create a key in Garmin Connect");
   expect(page).toContain("Delete all data");
+  expect(page).toContain("Erases the key and your history. This cannot be undone.");
+  expect(page).toContain("return confirm('Delete your Garmin key and history? This cannot be undone.')");
   expect(page).not.toContain('value="delete-key"');
   expect(page).not.toContain("Connect Claude");
 });
 
-it("delete-all returns to the first-visit page", async () => {
+it("one delete-all press erases everything and returns to the first-visit page", async () => {
   const email = await withKey();
   await addRecord(email);
-  const prefix = await inDo(email, (_s, st) => `u/${st.id.toString()}/`);
-  await env.FILES.put(`${prefix}file`, "x");
   const r = await post(email, { action: "delete-all" });
   expect(r.status).toBe(303);
   expect(r.headers.get("location")).toBe("/garmin/settings");
-  expect((await env.FILES.list({ prefix })).objects).toEqual([]);
+  expect(await records(email)).toBe(0);
+  expect(await kvKeys(email)).toEqual([]);
   const page = await html(email);
   expect(page).toContain("Not connected");
   expect(page).toContain("Create a key in Garmin Connect");
@@ -216,7 +217,7 @@ it("other paths 404, PUT 405", async () => {
 
 it("state line follows the badge precedence", () => {
   const base: SettingsState = { key: "ok", keyExpiresOn: "2028-02-14", daysLeft: 364, hasData: true, history: { done: true, percent: 100 } };
-  const render = (s: Partial<SettingsState>, error?: "invalid" | "rejected" | "unavailable" | "deleting") =>
+  const render = (s: Partial<SettingsState>, error?: "invalid" | "rejected" | "unavailable") =>
     renderPage({ ...base, ...s }, { email: "a@x", origin: "https://mcp.example.com", error });
   const loading = { history: { done: false, percent: 62, from: "2024-02-12" } };
   const pause = { pausedUntil: Date.parse("2026-11-08T15:30:00Z") };
@@ -245,9 +246,5 @@ it("state line follows the badge precedence", () => {
   expect(failed).toContain('aria-describedby="key-error"><p class="error" id="key-error">Garmin is not responding. Try again in a few minutes.</p>');
   expect(render({})).toContain('<details><summary class="row"><span>Working<br><span class="desc">Valid until February 14, 2028</span></span>');
   expect(render({})).toContain('<span class="btn">Replace key</span></summary>');
-  const deleting = render({}, "deleting");
-  expect(deleting).toContain('aria-describedby="delete-error"');
-  expect(deleting).toContain("Some files are still being deleted. Press Delete all again.");
-  expect(deleting).toContain("<details>");
   expect(render({ key: "none", hasData: false }, "invalid")).toContain("Paste the key and choose its validity.");
 });

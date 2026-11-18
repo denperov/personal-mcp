@@ -85,7 +85,6 @@ summary.row::-webkit-details-marker { display: none; }
 .input { font: inherit; width: 100%; height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--field); color: var(--text); }
 .error { margin: 6px 0 0; font-size: 13px; line-height: 18px; color: var(--text-danger); }
-.row > .error { flex-basis: 100%; margin: 0; }
 
 .copy { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 4px 0 12px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--field); }

@@ -21,12 +21,22 @@ const MATERIALIZE = new Map<string, string>(TYPED.map((t) => {
     FROM records WHERE dataset = ? AND key = ? ON CONFLICT(${t.pk}) DO UPDATE SET ${set}`];
 }));
 
+// SQLite caps a row at 8 MB (2M UTF-16 units are at most 6 MB of UTF-8); 2M also keeps reads and CPU sane
+export const MAX_RECORD_JSON = 2_000_000;
+
+/** A larger item is kept only as a size marker: the row exists, so the step is not refetched forever */
+function recordJson(data: unknown): string {
+  const json = JSON.stringify(data);
+  if (json.length <= MAX_RECORD_JSON) return json;
+  return JSON.stringify({ omitted: "too_large", bytes: new TextEncoder().encode(json).byteLength });
+}
+
 /** Σ rowsWritten: records + materialization of the changed ones */
 export function upsertRecords(sql: SqlStorage, dataset: string, items: Item[], fetchedAt: string): number {
   const mat = MATERIALIZE.get(dataset);
   let n = 0;
   for (const it of items) {
-    const w = sql.exec(UPSERT_RECORD, dataset, it.key, it.day, JSON.stringify(it.data), fetchedAt).rowsWritten;
+    const w = sql.exec(UPSERT_RECORD, dataset, it.key, it.day, recordJson(it.data), fetchedAt).rowsWritten;
     n += w;
     if (w > 0 && mat) n += sql.exec(mat, dataset, it.key).rowsWritten;
   }
@@ -49,25 +59,13 @@ export function patchState(sql: SqlStorage, dataset: string, patch: Partial<Omit
   ).rowsWritten;
 }
 
-export function putFile(
-  sql: SqlStorage, row: { activityId: string; r2Key: string | null; status: number; bytes: number | null; fetchedAt: string },
-): number {
-  return sql.exec(
-    `INSERT INTO files(activity_id, r2_key, status, bytes, fetched_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(activity_id) DO UPDATE SET r2_key = excluded.r2_key, status = excluded.status, bytes = excluded.bytes,
-      fetched_at = excluded.fetched_at`,
-    row.activityId, row.r2Key, row.status, row.bytes, row.fetchedAt,
-  ).rowsWritten;
-}
-
-export type ActivityPiece = "activity_detail" | "activity_workouts" | "activity_file";
+export type ActivityPiece = "activity_detail" | "activity_workouts";
 export interface Pieces { id: string; missing: ActivityPiece[] }
 
-// A piece exists if its row exists (primary key lookup); a files row with any status means Garmin already answered
+// A piece exists if its row exists (primary key lookup)
 const HAS: [ActivityPiece, (id: string) => string][] = [
   ["activity_detail", (id) => `EXISTS (SELECT 1 FROM records r WHERE r.dataset = 'activity_detail' AND r.key = ${id})`],
   ["activity_workouts", (id) => `EXISTS (SELECT 1 FROM records r WHERE r.dataset = 'activity_workouts' AND r.key = ${id})`],
-  ["activity_file", (id) => `EXISTS (SELECT 1 FROM files f WHERE f.activity_id = ${id})`],
 ];
 const hasCols = (id: string) => HAS.map(([k, has]) => `${has(id)} AS ${k}`).join(", ");
 const pieces = (rows: Record<string, SqlStorageValue>[]): Pieces[] =>
@@ -81,7 +79,7 @@ export function missingPieces(sql: SqlStorage, activityIds: string[]): Pieces[] 
 
 /**
  * Up to limit newest activities that lack at least one piece. Primary keys only, no JSON;
- * ponytail: with no gaps it scans the whole activities table (3 PK lookups per row); a cursor if CPU measurements show a problem (docs/architecture.md, section "Platform limits")
+ * ponytail: with no gaps it scans the whole activities table (2 PK lookups per row); a cursor if CPU measurements show a problem (docs/architecture.md, section "Platform limits")
  */
 export function incompleteActivities(sql: SqlStorage, limit: number): Pieces[] {
   return pieces(sql.exec(`SELECT a.activity_id AS id, ${hasCols("a.activity_id")} FROM activities a

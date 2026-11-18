@@ -4,7 +4,7 @@ import { HISTORY } from "../user/engine";
 import { allStates, type SyncState } from "../user/store";
 import { compact, INTRADAY_KEYS, stripIntraday } from "./format";
 
-// Read-only; everything is synchronous except getActivity (R2). Series and search read the typed tables, not a scan of records.
+// Read-only and synchronous. Series and search read the typed tables, not a scan of records.
 
 export type Metric = "steps" | "resting_hr" | "rhr_7d" | "stress_avg" | "bb_high" | "bb_low" | "bb_wake" | "intensity_moderate"
   | "intensity_vigorous" | "active_kcal" | "spo2_avg" | "respiration_avg" | "sleep_s" | "deep_s" | "rem_s" | "sleep_score"
@@ -85,29 +85,21 @@ export function searchActivities(
     .toArray().map((r) => compact(r) as object);
 }
 
-/** Stub {r2_key, bytes} → JSON from R2 (undefined if the object is missing) */
-async function inflate(files: R2Bucket, v: unknown): Promise<unknown> {
-  const key = (v as { r2_key?: unknown } | undefined)?.r2_key;
-  if (typeof key !== "string") return v;
-  const obj = await files.get(key);
-  return obj ? JSON.parse(await obj.text()) : undefined;
-}
-
 /** summary is the activity list item; without includeSplits, detail.splitSummaries is removed; null means an unknown id */
-export async function getActivity(
-  sql: SqlStorage, files: R2Bucket, id: string, o: { includeSplits: boolean; includeWorkout: boolean },
-): Promise<object | null> {
+export function getActivity(
+  sql: SqlStorage, id: string, o: { includeSplits: boolean; includeWorkout: boolean },
+): object | null {
   const recs = new Map(sql.exec<Rec>(
     "SELECT dataset, data FROM records WHERE key = ? AND dataset IN ('activity', 'activity_detail', 'activity_workouts')", id,
   ).toArray().map((r) => [r.dataset, JSON.parse(r.data) as unknown]));
   if (!recs.size) return null;
-  const detail = await inflate(files, recs.get("activity_detail"));
+  const detail = recs.get("activity_detail");
   if (!o.includeSplits && detail && typeof detail === "object") delete (detail as Row).splitSummaries;
   return compact({
     activity_id: id,
-    summary: await inflate(files, recs.get("activity")),
+    summary: recs.get("activity"),
     detail,
-    workouts: o.includeWorkout ? await inflate(files, recs.get("activity_workouts")) : undefined,
+    workouts: o.includeWorkout ? recs.get("activity_workouts") : undefined,
   }) as object;
 }
 
@@ -152,7 +144,7 @@ export function getWomensHealth(sql: SqlStorage, date: string): object {
 const HINTS = [
   "Typed tables daily, sleep, hrv, weight (key day = 'YYYY-MM-DD', user's local date) and activities (key activity_id, indexed by day) are cheap: prefer them.",
   "records(dataset, key, day, data, fetched_at) holds raw Garmin JSON in data: read it with data->>'$.path' or json_extract(data, '$.path'). Always filter by dataset (and key/day range): a full scan of records can exceed the per-call CPU limit.",
-  "Large items are stored outside SQL: their records.data is only {\"r2_key\":…,\"bytes\":…}.",
+  "Items over 2 MB of JSON are not stored: their records.data is only {\"omitted\":\"too_large\",\"bytes\":…}.",
   "SQLite here: at most 5 terms in one compound SELECT (UNION/INTERSECT/EXCEPT); no REGEXP, median, percentile or log10 (log(x) is base 10, ln(x) natural); LIKE patterns ≤ 50 bytes.",
   "Columns of a table: SELECT * FROM pragma_table_info('activities') (PRAGMA statements are rejected).",
   "Units: *_s seconds, *_min minutes, distance_m meters, weight_kg kilograms, avg_speed m/s, *_kcal kilocalories.",

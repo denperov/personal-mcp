@@ -49,7 +49,7 @@ export async function handleSettings(request: Request, email: string, env: Env):
         await user.deleteKey();
         break;
       case "delete-all":
-        if (!(await user.deleteAllData()).done) error = "deleting";
+        await user.deleteAllData();
         break;
     }
   } catch {

@@ -8,7 +8,6 @@
   "triggers": { "crons": [] },
   "durable_objects": { "bindings": [{ "name": "USER_DO", "class_name": "UserStore" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserStore"] }],
-  "r2_buckets": [{ "binding": "FILES", "bucket_name": "garmin-files" }],
   "vars": {
     "STEP_GAP_MS": "500"
   },

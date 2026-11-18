@@ -62,12 +62,13 @@ Garmin password.
 
 ## Where your data lives
 
-- **In your Cloudflare account:** one database per person, and activity files. Cloudflare encrypts both when it
-  stores them. Personal MCP encrypts only the Garmin keys, and they never reach Claude.
+- **In your Cloudflare account:** one database per person. Cloudflare encrypts it when it stores it. Personal MCP
+  encrypts only the Garmin keys, and they never reach Claude. Personal MCP does not copy activity files with GPS
+  tracks: they stay in Garmin Connect. Activity summaries can still include the start and end points.
 - **Each person sees only their own data, you included.** Personal MCP has no tool or page that shows one person's
   data to another. The data is still in your Cloudflare account, and not opening it there is up to you.
 - **It leaves only in answers to Claude.** Garmin is the only outside service it calls. Delete all on the
-  settings page erases your key, history and files.
+  settings page erases your key and history.
 
 ## What you need
 
@@ -76,9 +77,8 @@ you must have:
 
 - A host on your domain that nothing else uses, for example `mcp.example.com`.
 - Cloudflare Zero Trust with the Free plan (up to 50 users). Its sign-in part is Cloudflare Access.
-- R2, the file storage of Cloudflare. Do the checkout in Storage & databases → R2.
 
-NOTE: The Zero Trust and R2 checkouts ask for payment details. The plans that Personal MCP uses are free.
+NOTE: The Zero Trust checkout asks for payment details. The plan that Personal MCP uses is free.
 
 ## Install
 
@@ -167,7 +167,7 @@ cannot find the `KEY_ENCRYPTION_KEY` secret, read
 | `MCP_HOST must be a host name with a dot, such as mcp.example.com.` | Put only the host in `MCP_HOST`, for example `mcp.example.com`. Run Deploy again |
 | `Could not tell whether the Garmin Worker is installed.` | The token or the account ID is wrong, or the token cannot edit Workers. Make sure that `CLOUDFLARE_ACCOUNT_ID` is correct. Create the token again (step 3). Put it in `CLOUDFLARE_API_TOKEN`. Run Deploy again |
 | `The Garmin Worker exists but has no KEY_ENCRYPTION_KEY secret.` | WARNING: Do not delete the Garmin Worker. Do not change anything yet. In the dashboard, make sure that the secret is not there. Then read [Restore the encryption key](docs/install-manual.md#restore-the-encryption-key) |
-| `Deploying the Garmin Worker failed.` or `Deploying the Gateway Worker failed.` | Read the lines above the message. On a first installation, the usual cause is that you did not do the R2 checkout (see [What you need](#what-you-need)). If you did the R2 checkout, create the token again (step 3). The token probably cannot edit Workers |
+| `Deploying the Garmin Worker failed.` or `Deploying the Gateway Worker failed.` | Read the lines above the message. The usual cause is that the token cannot edit Workers. Create the token again (step 3). Put it in `CLOUDFLARE_API_TOKEN`. Run Deploy again |
 | `Could not check your host through the Cloudflare API.` | The token cannot read this account, or Cloudflare had a temporary problem. Make sure that the token and the account ID are correct. Run Deploy again |
 | `Your host is already a custom domain of another Worker. Choose an unused host.` | Put a different host in `MCP_HOST`, or remove the host from the other Worker. Run Deploy again |
 | `Deployed, but the host does not answer correctly yet: …` | The host did not pass the check after 15 minutes. Find the cause in the next table. Do the steps for that cause. Run Deploy again |

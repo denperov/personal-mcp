@@ -5,7 +5,7 @@ import { addDays, localDate } from "../garmin/dates";
 import { historyStart } from "../mcp/queries";
 import { runTool } from "../mcp/tools";
 import {
-  applyStep, BACKFILL_ORDER, fetchedFiles, fetchStep, nextBackfillStep, recentSteps, repairSteps, stateKey, staticSteps, stepKey, stepLabel, userTimeZone,
+  applyStep, BACKFILL_ORDER, fetchStep, nextBackfillStep, recentSteps, repairSteps, stateKey, staticSteps, stepKey, stepLabel, userTimeZone,
   type Fetched, type Step,
 } from "./engine";
 import { importKek, open, seal, type Sealed } from "./crypto";
@@ -140,7 +140,7 @@ export class UserStore extends DurableObject<Env> {
     await this.touch(Date.now());
     console.log(JSON.stringify({ tool: name }));
     return runTool({
-      storage: this.ctx.storage, sql: this.sql, files: this.env.FILES, now: new Date(),
+      storage: this.ctx.storage, sql: this.sql, now: new Date(),
       keyExpiresAt: this.kv.get<string>("keyExpiresOn") ?? "", hasKey: this.hasKey(),
       settingsUrl: `${origin}/garmin/settings`, syncNow: (d) => this.syncNow(d), queueSize: () => this.queueSize(),
     }, name, args);
@@ -193,20 +193,11 @@ export class UserStore extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
   }
 
-  /** All user data: R2 files, SQL, kv, alarm. Over 20×1000 files: done: false, calling again continues */
-  async deleteAllData(): Promise<{ done: boolean }> {
-    const prefix = `u/${this.ctx.id.toString()}/`;
-    // ponytail: 20×1000 files per call; pressing Delete all again continues
-    for (let i = 0; i < 20; i++) {
-      const { objects } = await this.env.FILES.list({ prefix, limit: 1000 });
-      if (!objects.length) break;
-      await this.env.FILES.delete(objects.map((o) => o.key));
-    }
-    if ((await this.env.FILES.list({ prefix, limit: 1 })).objects.length) return { done: false };
+  /** All user data: SQL, kv, alarm */
+  async deleteAllData(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     migrate(this.ctx.storage); // the object lives until eviction: later calls need the empty tables
-    return { done: true };
   }
 
   /**
@@ -275,7 +266,7 @@ export class UserStore extends DurableObject<Env> {
 
     let f: Fetched;
     try {
-      f = await fetchStep({ client: g.client, files: this.env.FILES, prefix: `u/${this.ctx.id.toString()}/`, today }, job.step);
+      f = await fetchStep({ client: g.client, today }, job.step);
     } catch (e) {
       if (!(await g.afterFetch())) return false; // key replaced or deleted: skip the step write; alarm is up to saveKey/deleteKey
       if (e instanceof RateLimitedError) {
@@ -287,12 +278,7 @@ export class UserStore extends DurableObject<Env> {
       } else this.fail(now, job, e, g.keyRows);
       return true;
     }
-    if (!(await g.afterFetch())) {
-      // and the step's files: Delete all may have run while the step waited for Garmin, and its list will not see them
-      const files = fetchedFiles(f);
-      if (files.length) await this.env.FILES.delete(files);
-      return false;
-    }
+    if (!(await g.afterFetch())) return false; // key replaced or deleted (Delete all too): the step writes nothing
     try {
       this.write(now, () => {
         const r = applyStep(this.sql, job.step, f, now, today);
