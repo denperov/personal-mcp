@@ -1,0 +1,27 @@
+{
+  "name": "mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --maxWorkers=4",
+    "dev": "wrangler dev -c workers/gateway/wrangler.jsonc -c workers/garmin/wrangler.jsonc --var ACCESS_AUD:dev",
+    "types": "wrangler types workers/gateway/worker-configuration.d.ts -c workers/gateway/wrangler.jsonc --strict-vars=false && wrangler types workers/garmin/worker-configuration.d.ts -c workers/garmin/wrangler.jsonc --strict-vars=false",
+    "typecheck": "wrangler types workers/gateway/worker-configuration.d.ts -c workers/gateway/wrangler.jsonc --strict-vars=false --check && wrangler types workers/garmin/worker-configuration.d.ts -c workers/garmin/wrangler.jsonc --strict-vars=false --check && tsc -p workers/gateway && tsc -p workers/garmin",
+    "deploy:gateway": "wrangler deploy -c workers/gateway/wrangler.jsonc",
+    "deploy:garmin": "wrangler deploy -c workers/garmin/wrangler.jsonc"
+  },
+  "dependencies": {
+    "agents": "0.31.0",
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "wrangler": "4.154.0",
+    "@cloudflare/vitest-plugin": "1.4.9",
+    "vitest": "5.0.5",
+    "typescript": "7.0.2",
+    "msw": "3.0.3",
+    "@msw/cloudflare": "0.2.0",
+    "@modelcontextprotocol/client": "2.3.1"
+  }
+}

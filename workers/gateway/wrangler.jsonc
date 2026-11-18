@@ -1,0 +1,13 @@
+{
+  "name": "personal-mcp-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-23",
+  "workers_dev": false,
+  "preview_urls": false,
+  // the domain is a Custom Domain on the Cloudflare side (dashboard or a one-off deploy --domain); do not add routes back
+  "secrets": { "required": ["ACCESS_AUD"] },
+  // wrangler dev only: Access emulation; aud matches --var ACCESS_AUD:dev in npm run dev
+  "access": { "dev": { "aud": "dev", "identity": { "email": "alex@example.com" } } },
+  "services": [{ "binding": "MCP_GARMIN", "service": "personal-mcp-garmin" }],
+  "observability": { "enabled": true }
+}
